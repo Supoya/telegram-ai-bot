@@ -23,9 +23,9 @@ LLM_MODEL = os.environ.get("OPENCODE_LLM_MODEL", "deepseek-v4-flash-vision-exp")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_RATE = os.environ.get("TTS_RATE", "+0%")
-MAX_TOKENS = int(os.environ.get("REPLY_MAX_TOKENS", "350"))
+MAX_TOKENS = int(os.environ.get("REPLY_MAX_TOKENS", "500"))
 
-_client = AsyncOpenAI(api_key=OPENCODE_GO_API_KEY, base_url=OPENCODE_GO_BASE_URL)
+_client = AsyncOpenAI(api_key=OPENCODE_GO_API_KEY, base_url=OPENCODE_GO_BASE_URL, timeout=120.0, max_retries=1)
 
 
 # ---------- 1) 大脑：对话 + 视觉 ----------
@@ -45,15 +45,18 @@ def _messages_to_api(history, new_text="", image_bytes=None, mime="image/jpeg"):
 
 
 async def llm_chat(history, new_text="", image_bytes=None, mime="image/jpeg"):
-    """调用 OpenCode-go 的视觉模型，返回回复文本。"""
+    """调用 OpenCode-go 的视觉模型，返回回复文本。模型空返回时重试一次。"""
     msgs = _messages_to_api(history, new_text, image_bytes, mime)
-    resp = await _client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=msgs,
-        max_tokens=MAX_TOKENS,
-    )
-    text = resp.choices[0].message.content or ""
-    return text.strip()
+    for attempt in (1, 2):
+        resp = await _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=msgs,
+            max_tokens=MAX_TOKENS,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text
+    raise RuntimeError("Model returned empty response after retry")
 
 
 # ---------- 2) 耳朵：Gemini 语音转文字 ----------

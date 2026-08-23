@@ -103,9 +103,9 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
         resp = await llm_chat(hist, user_text, image_bytes, mime)
     except Exception as e:
         LOG.warning("llm 调用失败: %s", e)
-        resp = "呃，我大脑突然短路了一下…再发一次给我？"
-        await bot.send_message(chat_id, resp)
-        return
+        resp = "嗯……我这边好像接不上话，你再说一遍？"
+    if not resp or not resp.strip():
+        resp = "嗯……我这边好像接不上话，你再说一遍？"
     _push(history_key, "user", user_text or ("图片" if image_bytes else ""))
     _push(history_key, "assistant", resp)
     await _save_history()
