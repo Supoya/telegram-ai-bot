@@ -26,6 +26,7 @@ from aiogram import BaseMiddleware
 import prompts
 from providers import llm_chat, tts_ogg_opus, transcribe_voice
 import reminders
+import memory
 
 LOG = logging.getLogger("xiaoxing")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -40,6 +41,7 @@ PROACTIVE_AS_VOICE = os.environ.get("PROACTIVE_AS_VOICE", "1") == "1"
 PROACTIVE_MIN_DAY = int(os.environ.get("PROACTIVE_MIN_DAY", "1"))
 PROACTIVE_MAX_DAY = int(os.environ.get("PROACTIVE_MAX_DAY", "2"))
 HISTORY_FILE = os.environ.get("HISTORY_FILE", "conversations.json")
+EXTRACT_EVERY = int(os.environ.get("EXTRACT_EVERY", "6"))
 
 bot = Bot(token=TOKEN)  # 纯文本发送，避免模型输出特殊字符触发 HTML 解析错误
 dp = Dispatcher()
@@ -129,7 +131,11 @@ async def _download(file_id) -> bytes:
 async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime="image/jpeg", voice=False):
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
     try:
-        hist = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + _get_hist(history_key)
+        sys_msgs = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
+        mem_block = memory.context_block()
+        if mem_block:
+            sys_msgs.append({"role": "system", "content": mem_block})
+        hist = sys_msgs + _get_hist(history_key)
         resp = await llm_chat(hist, user_text, image_bytes, mime)
     except Exception as e:
         LOG.warning("llm 调用失败: %s", e)
@@ -140,6 +146,12 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
     _push(history_key, "assistant", resp)
     await _maybe_compress(history_key)
     await _save_history()
+    # 跨对话长期记忆：对话增长到阈值就自动提炼一次
+    if len(_get_hist(history_key)) % EXTRACT_EVERY == 0:
+        try:
+            await memory.extract_and_merge(_get_hist(history_key), llm_chat)
+        except Exception as e:
+            LOG.warning("长期记忆提取异常: %s", e)
     if voice:
         await _send_voice(chat_id, resp)
     else:
@@ -350,6 +362,7 @@ async def _http_server():
 
 async def main():
     await _load_history()
+    memory.load()
     asyncio.create_task(_http_server())
     asyncio.create_task(proactive_loop())
     asyncio.create_task(reminders.reminder_loop(bot, OWNER, send_voice_fn=_send_voice))
