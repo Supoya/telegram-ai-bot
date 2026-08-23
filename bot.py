@@ -25,6 +25,7 @@ from aiogram import BaseMiddleware
 
 import prompts
 from providers import llm_chat, tts_ogg_opus, transcribe_voice
+import reminders
 
 LOG = logging.getLogger("xiaoxing")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -142,6 +143,17 @@ async def cmd_start(m: Message):
 # ---------- 文本 ----------
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(m: Message):
+    # 先看是否是定时提醒指令
+    rem = reminders.parse_reminder(m.text)
+    if rem is not None:
+        reminders_items = await reminders._load()
+        reminders_items = await reminders.add_reminder(rem, reminders_items)
+        when_s = rem.when.strftime("%H:%M" if rem.when.date() == datetime.now().date() else "%m-%d %H:%M")
+        if rem.repeat_daily:
+            await m.answer(f"好，以后每天 {rem.when.strftime('%H:%M')} 我都提醒你：「{rem.text}」✅")
+        else:
+            await m.answer(f"收到，{when_s} 提醒你：「{rem.text}」⏰")
+        return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
     await _reply_chat(m.chat.id, m.chat.id, m.text)
 
@@ -303,6 +315,7 @@ async def main():
     await _load_history()
     asyncio.create_task(_http_server())
     asyncio.create_task(proactive_loop())
+    asyncio.create_task(reminders.reminder_loop(bot, OWNER, send_voice_fn=_send_voice))
     LOG.info("小星已启动，模型=%s, owner=%s", os.environ.get("OPENCODE_LLM_MODEL", "deepseek-v4-flash-vision-exp"), OWNER)
     await dp.start_polling(bot)
 
