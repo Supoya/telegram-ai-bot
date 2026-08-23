@@ -7,6 +7,7 @@ providers.py —— 机器人依赖的三块能力：
 import asyncio
 import base64
 import io
+import logging
 import os
 import re
 import tempfile
@@ -24,6 +25,11 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_RATE = os.environ.get("TTS_RATE", "+0%")
 MAX_TOKENS = int(os.environ.get("REPLY_MAX_TOKENS", "800"))
+FISH_API_KEY = os.environ.get("FISH_API_KEY", "")
+FISH_VOICE_ID = os.environ.get("FISH_VOICE_ID", "")
+FISH_MODEL = os.environ.get("FISH_MODEL", "s2.1-pro-free")
+
+LOG = logging.getLogger("xiaoxing")
 
 _client = AsyncOpenAI(api_key=OPENCODE_GO_API_KEY, base_url=OPENCODE_GO_BASE_URL, timeout=120.0, max_retries=1)
 
@@ -105,9 +111,33 @@ async def transcribe_voice(audio_bytes, mime="audio/ogg"):
     return _clean_stt(raw)
 
 
-# ---------- 3) 嘴：edge-tts 语音合成 ----------
+# ---------- 3) 嘴：语音合成 ----------
 async def tts_mp3(text):
-    """edge-tts 合成中文语音，返回 mp3 字节。"""
+    """合成中文语音，返回 mp3 字节。优先 Fish Audio 克隆音色（叶星辰），失败回退 edge-tts。"""
+    if FISH_API_KEY and FISH_VOICE_ID:
+        try:
+            return await _fish_tts(text)
+        except Exception as e:
+            LOG.warning("Fish TTS 失败，回退 edge-tts: %s", e)
+    return await _edge_tts(text)
+
+
+async def _fish_tts(text):
+    """Fish Audio S2.1 Pro Free —— 用克隆的叶星辰音色合成语音。"""
+    headers = {
+        "Authorization": f"Bearer {FISH_API_KEY}",
+        "Content-Type": "application/json",
+        "model": FISH_MODEL,
+    }
+    payload = {"text": text, "reference_id": FISH_VOICE_ID}
+    async with httpx.AsyncClient(timeout=120) as c:
+        r = await c.post("https://api.fish.audio/v1/tts", headers=headers, json=payload)
+        r.raise_for_status()
+        return r.content
+
+
+async def _edge_tts(text):
+    """edge-tts 合成中文语音（兜底），返回 mp3 字节。"""
     buf = io.BytesIO()
     comm = edge_tts.Communicate(text, TTS_VOICE, rate=TTS_RATE)
     async for chunk in comm.stream():
