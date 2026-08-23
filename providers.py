@@ -23,7 +23,7 @@ LLM_MODEL = os.environ.get("OPENCODE_LLM_MODEL", "deepseek-v4-flash-vision-exp")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_RATE = os.environ.get("TTS_RATE", "+0%")
-MAX_TOKENS = int(os.environ.get("REPLY_MAX_TOKENS", "500"))
+MAX_TOKENS = int(os.environ.get("REPLY_MAX_TOKENS", "800"))
 
 _client = AsyncOpenAI(api_key=OPENCODE_GO_API_KEY, base_url=OPENCODE_GO_BASE_URL, timeout=120.0, max_retries=1)
 
@@ -53,7 +53,11 @@ async def llm_chat(history, new_text="", image_bytes=None, mime="image/jpeg"):
             messages=msgs,
             max_tokens=MAX_TOKENS,
         )
-        text = (resp.choices[0].message.content or "").strip()
+        msg = resp.choices[0].message
+        text = (msg.content or "").strip()
+        # 推理模型可能把配额花在思考上、正文为空：退回 reasoning_content
+        if not text:
+            text = (getattr(msg, "reasoning_content", None) or "").strip()
         if text:
             return text
     raise RuntimeError("Model returned empty response after retry")
