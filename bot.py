@@ -33,7 +33,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # ---------- 配置 ----------
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OWNER = int(os.environ["OWNER_CHAT_ID"])  # 唯一允许使用机器人的聊天 ID
-MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "16"))
+MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "400"))
+COMPRESS_AT = int(os.environ.get("COMPRESS_AT", "300"))
+COMPRESS_KEEP = int(os.environ.get("COMPRESS_KEEP", "150"))
 PROACTIVE_AS_VOICE = os.environ.get("PROACTIVE_AS_VOICE", "1") == "1"
 PROACTIVE_MIN_DAY = int(os.environ.get("PROACTIVE_MIN_DAY", "1"))
 PROACTIVE_MAX_DAY = int(os.environ.get("PROACTIVE_MAX_DAY", "2"))
@@ -72,8 +74,35 @@ def _get_hist(key) -> list:
 def _push(key, role, content):
     h = _get_hist(key)
     h.append({"role": role, "content": content})
-    del h[:-MAX_HISTORY]
     return h
+
+
+async def _maybe_compress(key):
+    """对话太长时把最早的一批压缩成一条摘要（system 角色），而非硬丢弃。"""
+    h = _get_hist(key)
+    if len(h) <= COMPRESS_AT:
+        return False
+    old = h[: COMPRESS_AT - COMPRESS_KEEP]  # 要压缩掉的最老部分
+    keep = h[COMPRESS_AT - COMPRESS_KEEP :]
+    try:
+        transcript = "\n".join(
+            f"{'我' if m['role'] == 'user' else '小星'}: {m['content']}" for m in old
+        )
+        summary = await llm_chat(
+            [],
+            "把下面这段对话压缩成一份简短的要点摘要（记录关键信息：约定、计划、日期、偏好、人名、任务）。只输出要点，不要寒暄。\n\n"
+            + transcript,
+        )
+    except Exception as e:
+        LOG.warning("历史压缩失败，退化为丢弃最老部分: %s", e)
+        summary = None
+    if summary:
+        # 用摘要替换掉最老部分：保留最近的一部分 + 一条摘要到最前
+        h[:] = [{"role": "system", "content": "（此前对话摘要）" + summary}] + keep
+        LOG.info("已压缩历史 %d -> %d 条 (chat=%s)", len(old) + len(keep), len(h), key)
+    else:
+        del h[:-MAX_HISTORY]
+    return True
 
 
 # ---------- 只响应主人 ----------
@@ -109,6 +138,7 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
         resp = "嗯……我这边好像接不上话，你再说一遍？"
     _push(history_key, "user", user_text or ("图片" if image_bytes else ""))
     _push(history_key, "assistant", resp)
+    await _maybe_compress(history_key)
     await _save_history()
     if voice:
         await _send_voice(chat_id, resp)
@@ -136,6 +166,7 @@ async def cmd_start(m: Message):
     await m.answer(
         "嗨，我是小星 ✨ 已经上线。\n"
         "你可以给我发：文字、照片、贴纸、语音（我会用语音条回你）。\n"
+        "我有记忆：会记住咱们聊的内容，也会记得你安排的提醒。\n"
         "我还会偶尔主动找你聊两句。"
     )
 
@@ -147,6 +178,13 @@ async def on_text(m: Message):
     rem = reminders.parse_reminder(m.text)
     if rem is not None:
         await reminders.add_reminder(rem)
+        _push(m.chat.id, "user", m.text)
+        _push(
+            m.chat.id,
+            "assistant",
+            f"（已设提醒：{rem.when:%m-%d %H:%M} 提醒「{rem.text}」）",
+        )
+        await _save_history()
         when_s = rem.when.strftime("%H:%M" if rem.when.date() == datetime.now().date() else "%m-%d %H:%M")
         if rem.repeat_daily:
             await m.answer(f"好，以后每天 {rem.when.strftime('%H:%M')} 我都提醒你：「{rem.text}」✅")
