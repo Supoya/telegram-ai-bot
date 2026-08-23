@@ -1,0 +1,8 @@
+.env
+conversations.json
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
