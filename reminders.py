@@ -173,31 +173,52 @@ def parse_reminder(msg: str) -> Reminder | None:
     return None
 
 
-# ---------- 存储 ----------
+# ---------- 共享内存存储（一个全局列表，供 bot.py 写入、reminder_loop 读取） ----------
+_ITEMS: list = []          # 内存中的提醒列表（唯一真源）
+_LOADED = False
+
 async def _load() -> list:
+    """把磁盘 JSON 读进全局 _ITEMS（仅启动时调用一次）。"""
+    global _ITEMS, _LOADED
+    if _LOADED:
+        return _ITEMS
     try:
         with open(REMINDER_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return [Reminder.from_dict(d) for d in data]
+        _ITEMS = [Reminder.from_dict(d) for d in data]
     except Exception:
-        return []
+        _ITEMS = []
+    _LOADED = True
+    return _ITEMS
 
 
-async def _save(items):
-    data = [r.to_dict() for r in items]
+def _sort():
+    _ITEMS.sort(key=lambda r: r.when)
+
+
+async def _save():
+    data = [r.to_dict() for r in _ITEMS]
     with open(REMINDER_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
 
+async def add_reminder(reminder: Reminder) -> None:
+    """新增一条提醒：写入全局列表并落盘。供 bot.py 调用。"""
+    await _load()
+    _ITEMS.append(reminder)
+    _sort()
+    await _save()
+
+
 # ---------- 调度循环 ----------
 async def reminder_loop(bot, owner_id, *, send_voice_fn):
-    """持续后台：到点就主动给主人发提醒。repeat 的按天重新排。"""
-    await asyncio.sleep(15)
-    items = await _load()
-    LOG.info("提醒加载完成，当前 %d 条", len(items))
+    """持续后台：共享列表到点就主动给主人发提醒。repeat 的按天重新排。"""
+    await asyncio.sleep(int(os.environ.get("REMINDER_START_DELAY", "15")))
+    await _load()
+    LOG.info("提醒加载完成，当前 %d 条", len(_ITEMS))
     while True:
         now = datetime.now()
-        due = [r for r in items if r.when <= now]
+        due = [r for r in _ITEMS if r.when <= now]
         if due:
             for r in due:
                 try:
@@ -208,23 +229,16 @@ async def reminder_loop(bot, owner_id, *, send_voice_fn):
                     LOG.info("提醒触发: %s", r.text[:40])
                 except Exception as e:
                     LOG.warning("提醒发送失败: %s", e)
-            # 移除一次性；repeat 的排到明天
+            # 移除触发过的一次性；repeat 的排到下一天
             kept = []
-            for r in items:
+            for r in _ITEMS:
                 if r.when > now:
                     kept.append(r)
                 elif r.repeat_daily:
                     nxt = r.when + timedelta(days=1)
                     r.when = nxt
                     kept.append(r)
-            items = kept
-            await _save(items)
-        await asyncio.sleep(20)
-
-
-# 供 bot.py 使用：新增一条提醒并落盘
-async def add_reminder(reminder: Reminder, items: list) -> list:
-    items.append(reminder)
-    items = sorted(items, key=lambda r: r.when)
-    await _save(items)
-    return items
+            _ITEMS.clear()
+            _ITEMS.extend(kept)
+            await _save()
+        await asyncio.sleep(int(os.environ.get("REMINDER_CHECK_INTERVAL", "20")))

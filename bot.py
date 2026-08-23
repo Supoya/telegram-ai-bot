@@ -146,8 +146,7 @@ async def on_text(m: Message):
     # 先看是否是定时提醒指令
     rem = reminders.parse_reminder(m.text)
     if rem is not None:
-        reminders_items = await reminders._load()
-        reminders_items = await reminders.add_reminder(rem, reminders_items)
+        await reminders.add_reminder(rem)
         when_s = rem.when.strftime("%H:%M" if rem.when.date() == datetime.now().date() else "%m-%d %H:%M")
         if rem.repeat_daily:
             await m.answer(f"好，以后每天 {rem.when.strftime('%H:%M')} 我都提醒你：「{rem.text}」✅")
