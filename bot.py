@@ -27,6 +27,7 @@ import prompts
 from providers import llm_chat, tts_ogg_opus, transcribe_voice
 import reminders
 import memory
+import stickers
 
 LOG = logging.getLogger("xiaoxing")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -193,8 +194,11 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
         resp = "嗯……我这边好像接不上话，你再说一遍？"
     if not resp or not resp.strip():
         resp = "嗯……我这边好像接不上话，你再说一遍？"
+    # 若模型想发表情包，把标记从正文移除，正文照常，稍后再发贴纸
+    want_sticker = "[[sticker]]" in resp
+    clean_resp = resp.replace("[[sticker]]", "").strip() or "…"
     _push(history_key, "user", user_text or ("图片" if image_bytes else ""), ts=ts)
-    _push(history_key, "assistant", resp)
+    _push(history_key, "assistant", clean_resp)
     await _maybe_compress(history_key)
     await _save_history()
     # 跨对话长期记忆：对话增长到阈值就自动提炼一次（用"条数是阈值倍数"）
@@ -204,9 +208,23 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
         except Exception as e:
             LOG.warning("长期记忆提取异常: %s", e)
     if voice:
-        await _send_voice(chat_id, resp)
+        await _send_voice(chat_id, clean_resp)
     else:
-        await bot.send_message(chat_id, resp)
+        await bot.send_message(chat_id, clean_resp)
+    if want_sticker:
+        await _maybe_send_sticker(chat_id)
+
+
+async def _maybe_send_sticker(chat_id):
+    """发出一个收藏的表情包贴纸（仅当 _reply_chat 判定模型想发表情包时调用）。"""
+    fid = stickers.pick()
+    if not fid:
+        return
+    try:
+        await bot.send_sticker(chat_id, fid)
+        LOG.info("小星发了个表情包")
+    except Exception as e:
+        LOG.debug("发贴纸失败(可忽略): %s", e)
 
 
 async def _send_voice(chat_id, text):
@@ -277,6 +295,8 @@ async def on_photo(m: Message):
 @router.message(F.sticker)
 async def on_sticker(m: Message):
     st = m.sticker
+    # 收藏你发来的贴纸，以后她会用来回你
+    stickers.remember(st.file_id)
     # 动画/视频贴纸无法直接识别，退化为文字描述
     if st.is_animated or st.is_video:
         await _reply_chat(m.chat.id, m.chat.id, "[你发了一个贴纸]")
@@ -442,8 +462,10 @@ async def _http_server():
 async def main():
     await _load_history()
     memory.load()
+    stickers.load()
     asyncio.create_task(_http_server())
     asyncio.create_task(proactive_loop())
+    asyncio.create_task(stickers.fetch_default(bot))
     asyncio.create_task(reminders.reminder_loop(bot, OWNER, send_voice_fn=_send_voice))
     LOG.info("小星已启动，模型=%s, owner=%s", os.environ.get("OPENCODE_LLM_MODEL", "deepseek-v4-flash-vision-exp"), OWNER)
     await dp.start_polling(bot)

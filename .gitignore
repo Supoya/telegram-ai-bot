@@ -8,3 +8,4 @@ __pycache__/
 *.log
 reminders.json
 longterm_memory.json
+stickers.json
