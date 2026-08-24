@@ -41,7 +41,7 @@ PROACTIVE_AS_VOICE = os.environ.get("PROACTIVE_AS_VOICE", "1") == "1"
 PROACTIVE_MIN_DAY = int(os.environ.get("PROACTIVE_MIN_DAY", "1"))
 PROACTIVE_MAX_DAY = int(os.environ.get("PROACTIVE_MAX_DAY", "2"))
 HISTORY_FILE = os.environ.get("HISTORY_FILE", "conversations.json")
-EXTRACT_EVERY = int(os.environ.get("EXTRACT_EVERY", "6"))
+EXTRACT_EVERY = int(os.environ.get("EXTRACT_EVERY", "4"))
 
 bot = Bot(token=TOKEN)  # 纯文本发送，避免模型输出特殊字符触发 HTML 解析错误
 dp = Dispatcher()
@@ -154,6 +154,20 @@ async def _react(chat_id, message_id, emoji: str):
         return False
 
 
+REACT_PROB = float(os.environ.get("REACT_PROB", "0.6"))   # 她回赞某条消息的概率
+REACT_MIN_DELAY = float(os.environ.get("REACT_MIN_DELAY", "0.8"))  # 秒
+REACT_MAX_DELAY = float(os.environ.get("REACT_MAX_DELAY", "2.5"))  # 秒
+
+
+async def _react_like_human(chat_id, message_id, emoji):
+    """拟人化回赞：随机跳过一部分（不每条都回），并随机延迟 0.8~2.5s，避免瞬回/机械。"""
+    if random.random() > REACT_PROB:
+        return False
+    delay = random.uniform(REACT_MIN_DELAY, REACT_MAX_DELAY)
+    await asyncio.sleep(delay)
+    return await _react(chat_id, message_id, emoji)
+
+
 def _emoji_from(new_reaction) -> list:
     out = []
     for rt in new_reaction:
@@ -183,7 +197,7 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
     _push(history_key, "assistant", resp)
     await _maybe_compress(history_key)
     await _save_history()
-    # 跨对话长期记忆：对话增长到阈值就自动提炼一次
+    # 跨对话长期记忆：对话增长到阈值就自动提炼一次（用"条数是阈值倍数"）
     if len(_get_hist(history_key)) % EXTRACT_EVERY == 0:
         try:
             await memory.extract_and_merge(_get_hist(history_key), llm_chat)
@@ -241,7 +255,7 @@ async def on_text(m: Message):
             await m.answer(f"收到，{when_s} 提醒你：「{rem.text}」⏰")
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _react_like_human(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
     await _reply_chat(m.chat.id, m.chat.id, m.text, ts=m.date)
 
 
@@ -255,7 +269,7 @@ async def on_photo(m: Message):
         LOG.warning("照片下载失败: %s", e)
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _react_like_human(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
     await _reply_chat(m.chat.id, m.chat.id, m.caption or "", image_bytes=data, mime="image/jpeg", ts=m.date)
 
 
@@ -273,7 +287,7 @@ async def on_sticker(m: Message):
         LOG.warning("贴纸下载失败: %s", e)
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _react_like_human(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
     await _reply_chat(m.chat.id, m.chat.id, "[你发了一个贴纸]", image_bytes=data, mime="image/webp", ts=m.date)
 
 
@@ -293,7 +307,7 @@ async def on_voice(m: Message):
         text = ""
     if not text:
         text = "[你发了语音，但没转出来，我就当没听见啦]"
-    await _react(m.chat.id, m.message_id, "🎤" if not text.startswith("[你发了") else "😅")
+    await _react_like_human(m.chat.id, m.message_id, "🎤" if not text.startswith("[你发了") else "😅")
     await _reply_chat(m.chat.id, m.chat.id, text, voice=True, ts=m.date)
 
 
@@ -317,7 +331,7 @@ async def on_audio(m: Message):
         text = ""
     if not text:
         text = "[收到一段音频，但我没听清内容]"
-    await _react(m.chat.id, m.message_id, "🎧")
+    await _react_like_human(m.chat.id, m.message_id, "🎧")
     await _reply_chat(m.chat.id, m.chat.id, text, voice=True, ts=m.date)
 
 
@@ -338,13 +352,9 @@ async def on_reaction(ev: MessageReactionUpdated):
     if not added:
         return
     added_emoji = added[0]
-    # 她回一个匹配的、更亲昵的反应
+    # 她回一个匹配的、更亲昵的反应（拟人化：也可能不立即回）
     reply_emoji = _RECIPROCAL.get(added_emoji, "🥰")
-    await _react(ev.chat.id, ev.message_id, reply_emoji)
-    # 记录进历史，让她"记得"你点过赞
-    _push(ev.chat.id, "system", f"(我摸了摸你上一条消息，点了个{added_emoji}，你悄悄对我甜甜一笑)")
-    # 若触发阈值，顺带压缩/落盘
-    await _save_history()
+    await _react_like_human(ev.chat.id, ev.message_id, reply_emoji)
     LOG.info("收到主人的反应 %s，回赠 %s (msg=%s)", added_emoji, reply_emoji, ev.message_id)
 
 
