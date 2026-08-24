@@ -7,6 +7,7 @@ providers.py —— 机器人依赖的三块能力：
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 import re
@@ -67,6 +68,94 @@ async def llm_chat(history, new_text="", image_bytes=None, mime="image/jpeg"):
         if text:
             return text
     raise RuntimeError("Model returned empty response after retry")
+
+
+# ---------- 1b) 联网工具调用（模型自主决定搜索/抓图） ----------
+# 模型可见的工具
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "在网络上搜索（可搜 YouTube、新闻、食谱等），返回找到的标题和链接。当用户让我找视频/网站/资料时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "搜索关键词，最好用英文提高命中率"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_photo",
+            "description": "从在线图库抓一张应景的图片发给用户。当用户想看图片、或气氛适合发张配图时使用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"subject": {"type": "string", "description": "图片内容/主题，用英文关键词，例如 cat / sunset / cute"}},
+                "required": ["subject"],
+            },
+        },
+    },
+]
+
+_TOOL_EXEC = {"web_search": "web_search", "send_photo": "send_photo"}
+
+
+async def llm_chat_tools(history, new_text="", image_bytes=None, mime="image/jpeg"):
+    """带工具调用的对话循环。返回 dict：{"text":..., "photo": bytes|None, "photo_caption":str}。
+    模型可自主调用 web_search / send_photo，最多循环 MAX_TOOL_ROUNDS 轮。"""
+    from web_tools import search_for_links, fetch_photo
+
+    max_rounds = int(os.environ.get("MAX_TOOL_ROUNDS", "2"))
+    msgs = _messages_to_api(history, new_text, image_bytes, mime)
+    photo = None
+    photo_caption = ""
+    resp = None
+    for _ in range(max_rounds + 1):
+        resp = await _client.chat.completions.create(
+            model=LLM_MODEL, messages=msgs, max_tokens=MAX_TOKENS, tools=TOOLS, tool_choice="auto"
+        )
+        msg = resp.choices[0].message
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            text = (msg.content or "").strip()
+            if not text:
+                text = (getattr(msg, "reasoning_content", None) or "").strip()
+            return {"text": text, "photo": photo, "photo_caption": photo_caption}
+        # 有工具调用：执行并回填
+        msgs.append({"role": "assistant", "content": msg.content, "tool_calls": [
+            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in tool_calls
+        ]})
+        for tc in tool_calls:
+            fn = tc.function.name
+            args = json.loads(tc.function.arguments or "{}")
+            try:
+                if fn == "web_search":
+                    result = await search_for_links(args.get("query", ""))
+                    msg_content = "搜索到的结果（标题+链接）：\n" + result
+                elif fn == "send_photo":
+                    subject = args.get("subject", "daily")
+                    photo_bytes = await fetch_photo(subject)
+                    if photo_bytes:
+                        photo = photo_bytes
+                        photo_caption = f"（给你发了一张{subject}的图）"
+                        msg_content = f"图片已抓取成功，主题: {subject}。请在最终回复中自然提及发了这张图。"
+                    else:
+                        msg_content = "抓图失败，请在回复中礼貌说明今天没能发图。"
+                else:
+                    msg_content = "未知工具"
+            except Exception as e:
+                LOG.warning("工具 %s 执行失败: %s", fn, e)
+                msg_content = "工具执行失败"
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": msg_content})
+    text = ""
+    try:
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        text = ""
+    return {"text": text, "photo": photo, "photo_caption": photo_caption}
 
 
 # ---------- 2) 耳朵：Gemini 语音转文字 ----------

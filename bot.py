@@ -24,7 +24,7 @@ from aiogram.types import Message, BufferedInputFile, ReactionTypeEmoji, Message
 from aiogram import BaseMiddleware
 
 import prompts
-from providers import llm_chat, tts_ogg_opus, transcribe_voice
+from providers import llm_chat, llm_chat_tools, tts_ogg_opus, transcribe_voice
 import reminders
 import memory
 import stickers
@@ -185,13 +185,22 @@ def _emoji_from(new_reaction) -> list:
 # ---------- 回复 ----------
 async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime="image/jpeg", voice=False, ts=None):
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    photo = None
+    photo_caption = ""
     try:
         sys_msgs = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
         mem_block = memory.context_block()
         if mem_block:
             sys_msgs.append({"role": "system", "content": mem_block})
         hist = sys_msgs + _get_hist(history_key)
-        resp = await llm_chat(hist, user_text, image_bytes, mime)
+        # 文本/带图对话都用工具版：她可自主搜索(推YouTube/网站)或抓图发照片；失败时兜底给文字
+        try:
+            out = await llm_chat_tools(hist, user_text, image_bytes, mime)
+            resp = (out.get("text") or "").strip()
+            photo = out.get("photo")
+            photo_caption = out.get("photo_caption", "") or ""
+        except Exception:
+            resp = await llm_chat(hist, user_text, image_bytes, mime)
     except Exception as e:
         LOG.warning("llm 调用失败: %s", e)
         resp = "嗯……我这边好像接不上话，你再说一遍？"
@@ -210,6 +219,12 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
             await memory.extract_and_merge(_get_hist(history_key), llm_chat)
         except Exception as e:
             LOG.warning("长期记忆提取异常: %s", e)
+    if photo:
+        # 有图：先发图(带说明)，再发文字
+        try:
+            await bot.send_photo(chat_id, BufferedInputFile(photo, filename="photo.jpg"), caption=photo_caption or None)
+        except Exception as e:
+            LOG.warning("发图失败: %s", e)
     if voice:
         await _send_voice(chat_id, clean_resp)
     else:
