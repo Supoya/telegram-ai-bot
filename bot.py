@@ -20,7 +20,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, ReactionTypeEmoji, MessageReactionUpdated
 from aiogram import BaseMiddleware
 
 import prompts
@@ -73,9 +73,16 @@ def _get_hist(key) -> list:
     return history.setdefault(str(key), [])
 
 
-def _push(key, role, content):
+def _time_tag(ts=None):
+    """给消息内容加一个可见的时间标签（[时间] 前缀），让模型感知消息发送时刻。"""
+    dt = ts or datetime.now()
+    return f"[{dt.strftime('%m-%d %H:%M')}]"
+
+
+def _push(key, role, content, ts=None):
     h = _get_hist(key)
-    h.append({"role": role, "content": content})
+    tag = _time_tag(ts)
+    h.append({"role": role, "content": f"{tag} {content}"})
     return h
 
 
@@ -127,8 +134,38 @@ async def _download(file_id) -> bytes:
     return buf.getvalue()
 
 
+# ---------- 消息反应（点赞/爱心） ----------
+_OUT_REACTIONS = ["❤️", "😊", "🥰", "💕", "👍", "😘"]
+# 你对她的反应 -> 她回应的匹配反应
+_RECIPROCAL = {
+    "❤️": "🥰", "🔥": "🥰", "👍": "😊", "🥳": "😄", "😍": "😘",
+    "😂": "😄", "🎉": "🥳", "😢": "🥺", "🤔": "🤗", "👏": "🥰",
+}
+
+
+async def _react(chat_id, message_id, emoji: str):
+    try:
+        await bot.set_message_reaction(
+            chat_id, message_id, reaction=[ReactionTypeEmoji(emoji=emoji)]
+        )
+        return True
+    except Exception as e:
+        LOG.debug("react 失败(可忽略): %s", e)
+        return False
+
+
+def _emoji_from(new_reaction) -> list:
+    out = []
+    for rt in new_reaction:
+        if getattr(rt, "emoji", None):
+            out.append(rt.emoji)
+        elif getattr(rt, "custom_emoji_id", None):
+            out.append("✨")
+    return out
+
+
 # ---------- 回复 ----------
-async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime="image/jpeg", voice=False):
+async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime="image/jpeg", voice=False, ts=None):
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
     try:
         sys_msgs = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
@@ -142,7 +179,7 @@ async def _reply_chat(chat_id, history_key, user_text, *, image_bytes=None, mime
         resp = "嗯……我这边好像接不上话，你再说一遍？"
     if not resp or not resp.strip():
         resp = "嗯……我这边好像接不上话，你再说一遍？"
-    _push(history_key, "user", user_text or ("图片" if image_bytes else ""))
+    _push(history_key, "user", user_text or ("图片" if image_bytes else ""), ts=ts)
     _push(history_key, "assistant", resp)
     await _maybe_compress(history_key)
     await _save_history()
@@ -190,7 +227,7 @@ async def on_text(m: Message):
     rem = reminders.parse_reminder(m.text)
     if rem is not None:
         await reminders.add_reminder(rem)
-        _push(m.chat.id, "user", m.text)
+        _push(m.chat.id, "user", m.text, ts=m.date)
         _push(
             m.chat.id,
             "assistant",
@@ -204,7 +241,8 @@ async def on_text(m: Message):
             await m.answer(f"收到，{when_s} 提醒你：「{rem.text}」⏰")
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _reply_chat(m.chat.id, m.chat.id, m.text)
+    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _reply_chat(m.chat.id, m.chat.id, m.text, ts=m.date)
 
 
 # ---------- 照片 ----------
@@ -217,7 +255,8 @@ async def on_photo(m: Message):
         LOG.warning("照片下载失败: %s", e)
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _reply_chat(m.chat.id, m.chat.id, m.caption or "", image_bytes=data, mime="image/jpeg")
+    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _reply_chat(m.chat.id, m.chat.id, m.caption or "", image_bytes=data, mime="image/jpeg", ts=m.date)
 
 
 # ---------- 贴纸 ----------
@@ -234,7 +273,8 @@ async def on_sticker(m: Message):
         LOG.warning("贴纸下载失败: %s", e)
         return
     await bot.send_chat_action(m.chat.id, ChatAction.TYPING)
-    await _reply_chat(m.chat.id, m.chat.id, "[你发了一个贴纸]", image_bytes=data, mime="image/webp")
+    await _react(m.chat.id, m.message_id, random.choice(_OUT_REACTIONS))
+    await _reply_chat(m.chat.id, m.chat.id, "[你发了一个贴纸]", image_bytes=data, mime="image/webp", ts=m.date)
 
 
 # ---------- 语音 / 音频（转文字 -> 思考 -> 语音条回） ----------
@@ -253,7 +293,8 @@ async def on_voice(m: Message):
         text = ""
     if not text:
         text = "[你发了语音，但没转出来，我就当没听见啦]"
-    await _reply_chat(m.chat.id, m.chat.id, text, voice=True)
+    await _react(m.chat.id, m.message_id, "🎤" if not text.startswith("[你发了") else "😅")
+    await _reply_chat(m.chat.id, m.chat.id, text, voice=True, ts=m.date)
 
 
 @router.message(F.audio | F.document)
@@ -276,7 +317,35 @@ async def on_audio(m: Message):
         text = ""
     if not text:
         text = "[收到一段音频，但我没听清内容]"
-    await _reply_chat(m.chat.id, m.chat.id, text, voice=True)
+    await _react(m.chat.id, m.message_id, "🎧")
+    await _reply_chat(m.chat.id, m.chat.id, text, voice=True, ts=m.date)
+
+
+# ---------- 识别你对她的点赞/爱心 ----------
+@router.message_reaction()
+async def on_reaction(ev: MessageReactionUpdated):
+    # 只响应主人
+    user = getattr(ev, "user", None)
+    if user is None or user.id != OWNER:
+        return
+    new_emo = _emoji_from(ev.new_reaction)
+    if not new_emo:
+        return
+    # 只挑"新出现"的反应：Aiogram 的 MessageReactionUpdated 里 new_reaction 是当前全部。
+    # 用旧反应对比，仅处理新增（避免每次全量更新都重复触发）。
+    old_emo = set(_emoji_from(ev.old_reaction))
+    added = [e for e in new_emo if e not in old_emo]
+    if not added:
+        return
+    added_emoji = added[0]
+    # 她回一个匹配的、更亲昵的反应
+    reply_emoji = _RECIPROCAL.get(added_emoji, "🥰")
+    await _react(ev.chat.id, ev.message_id, reply_emoji)
+    # 记录进历史，让她"记得"你点过赞
+    _push(ev.chat.id, "system", f"(我摸了摸你上一条消息，点了个{added_emoji}，你悄悄对我甜甜一笑)")
+    # 若触发阈值，顺带压缩/落盘
+    await _save_history()
+    LOG.info("收到主人的反应 %s，回赠 %s (msg=%s)", added_emoji, reply_emoji, ev.message_id)
 
 
 # ---------- 主动搭话调度 ----------

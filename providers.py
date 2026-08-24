@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 OPENCODE_GO_API_KEY = os.environ["OPENCODE_GO_API_KEY"]
 OPENCODE_GO_BASE_URL = os.environ.get("OPENCODE_GO_BASE_URL", "https://opencode.ai/zen/go/v1")
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-LLM_MODEL = os.environ.get("OPENCODE_LLM_MODEL", "deepseek-v4-flash-vision-exp")
+LLM_MODEL = os.environ.get("OPENCODE_LLM_MODEL", "kimi-k3")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 TTS_VOICE = os.environ.get("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
 TTS_RATE = os.environ.get("TTS_RATE", "+0%")
