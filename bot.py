@@ -82,8 +82,11 @@ def _time_tag(ts=None):
 
 def _push(key, role, content, ts=None):
     h = _get_hist(key)
-    tag = _time_tag(ts)
-    h.append({"role": role, "content": f"{tag} {content}"})
+    # 只给用户消息加时间标签（让她知道“你什么时候发”）；她自己的回复不带，避免她模仿拼接时间。
+    if role == "user":
+        tag = _time_tag(ts)
+        content = f"{tag} {content}"
+    h.append({"role": role, "content": content})
     return h
 
 
